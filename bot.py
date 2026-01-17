@@ -13,20 +13,111 @@ from colorama import init, Fore, Style
 init(autoreset=True)
 load_dotenv()
 
+# ==========================================
+# BAGIAN 1: HELPER FUNGSI (UI & VALIDASI)
+# ==========================================
+
+def print_header(title):
+    print(f"\n{Fore.CYAN}{Style.BRIGHT}{'='*50}")
+    print(f"{title.center(50)}")
+    print(f"{'='*50}{Style.RESET_ALL}")
+
+def ask_yes_no(question):
+    """Meminta input y/n dengan validasi loop"""
+    while True:
+        response = input(f"{Fore.YELLOW}[?] {question} (y/n): {Style.RESET_ALL}").lower().strip()
+        if response in ['y', 'yes']:
+            return True
+        elif response in ['n', 'no']:
+            return False
+        else:
+            print(f"{Fore.RED}    [!] Input salah! Harap ketik 'y' atau 'n'.{Style.RESET_ALL}")
+
+def ask_choice(question, choices, default=None):
+    """Meminta input pilihan string (misal: en/id)"""
+    choices_str = "/".join(choices)
+    while True:
+        prompt = f"{Fore.YELLOW}[?] {question} ({choices_str})"
+        if default:
+            prompt += f" [Default: {default}]"
+        prompt += f": {Style.RESET_ALL}"
+        
+        response = input(prompt).lower().strip()
+        
+        if not response and default:
+            return default
+        if response in choices:
+            return response
+        
+        print(f"{Fore.RED}    [!] Pilihan tidak valid. Pilih antara: {choices_str}{Style.RESET_ALL}")
+
+def ask_int(question, default=None, min_val=0):
+    """Meminta input angka dengan validasi"""
+    while True:
+        prompt = f"{Fore.YELLOW}[?] {question}"
+        if default is not None:
+            prompt += f" [Default: {default}]"
+        prompt += f": {Style.RESET_ALL}"
+        
+        response = input(prompt).strip()
+        
+        if not response and default is not None:
+            return default
+        
+        if response.isdigit():
+            val = int(response)
+            if val >= min_val:
+                return val
+            else:
+                print(f"{Fore.RED}    [!] Angka harus lebih besar dari {min_val}.{Style.RESET_ALL}")
+        else:
+            print(f"{Fore.RED}    [!] Harap masukkan angka yang valid.{Style.RESET_ALL}")
+
+# ==========================================
+# BAGIAN 2: LOGIKA FILE CHAT MANUAL
+# ==========================================
+chat_lines = []
+chat_index = 0
+
+def load_chat_file():
+    global chat_lines
+    try:
+        if os.path.exists("chat.txt"):
+            with open("chat.txt", "r", encoding="utf-8") as file:
+                chat_lines = [line.strip() for line in file.readlines() if line.strip()]
+            print(f"{Fore.GREEN}[INFO] Berhasil memuat {len(chat_lines)} baris dari chat.txt")
+        else:
+            print(f"{Fore.RED}[ERROR] File chat.txt tidak ditemukan! Pastikan file ada di folder yang sama.")
+    except Exception as e:
+        print(f"{Fore.RED}[ERROR] Gagal membaca chat.txt: {e}")
+
+def get_next_chat_message():
+    global chat_index, chat_lines
+    if not chat_lines:
+        return "chat.txt kosong atau tidak ditemukan!"
+    
+    message = chat_lines[chat_index]
+    chat_index += 1
+    if chat_index >= len(chat_lines):
+        chat_index = 0
+    return message
+
+# ==========================================
+# BAGIAN 3: KONFIGURASI BOT & AI
+# ==========================================
+
 discord_tokens_env = os.getenv('DISCORD_TOKENS', '')
 if discord_tokens_env:
     discord_tokens = [token.strip() for token in discord_tokens_env.split(',') if token.strip()]
 else:
     discord_token = os.getenv('DISCORD_TOKEN')
     if not discord_token:
-        raise ValueError("Tidak ada Discord token! Atur DISCORD_TOKENS atau DISCORD_TOKEN di .env.")
-    discord_tokens = [discord_token]
+        discord_tokens = []
 
 google_api_keys = os.getenv('GOOGLE_API_KEYS', '').split(',')
 google_api_keys = [key.strip() for key in google_api_keys if key.strip()]
-if not google_api_keys:
-    raise ValueError("Tidak ada Google API Key! Atur GOOGLE_API_KEYS di .env.")
 
+# DAFTAR MODEL
 AVAILABLE_MODELS = [
     "gemini-3-flash-preview",
     "gemini-2.5-flash",
@@ -79,14 +170,6 @@ def log_message(message, level="INFO"):
 
     print(f"{color}[{timestamp}] {icon} {message}{Style.RESET_ALL}")
 
-def get_random_message_from_file():
-    try:
-        with open("pesan.txt", "r", encoding="utf-8") as file:
-            messages = [line.strip() for line in file.readlines() if line.strip()]
-            return random.choice(messages) if messages else "Tidak ada pesan tersedia di file."
-    except FileNotFoundError:
-        return "File pesan.txt tidak ditemukan!"
-
 def get_active_model():
     global current_model_index
     if current_model_index < len(AVAILABLE_MODELS):
@@ -130,7 +213,11 @@ def generate_language_specific_prompt(user_message, prompt_language):
 def generate_reply(prompt, prompt_language, use_google_ai=True):
     global last_generated_text, used_api_keys
 
+    # JIKA MENGGUNAKAN AI
     if use_google_ai:
+        if not google_api_keys:
+             return "Error: API Key Google belum disetting di .env"
+
         google_api_key = get_random_api_key()
         current_model = get_active_model()
         
@@ -183,8 +270,14 @@ def generate_reply(prompt, prompt_language, use_google_ai=True):
             except requests.exceptions.RequestException:
                 time.sleep(2)
                 return generate_reply(prompt, prompt_language, use_google_ai)
+    
+    # JIKA TIDAK MENGGUNAKAN AI (MANUAL MODE)
     else:
-        return get_random_message_from_file()
+        return get_next_chat_message()
+
+# ==========================================
+# BAGIAN 4: DISCORD API WRAPPER
+# ==========================================
 
 def get_channel_info(channel_id, token):
     headers = {'Authorization': token}
@@ -229,22 +322,23 @@ def send_message(channel_id, text, token, reply_to=None, delete_after=None, dele
     last_sent = last_message_timestamps.get(channel_id, 0)
     elapsed = time.time() - last_sent
     
+    # Jika slowmode aktif, tunggu sampai aman
     if slow_mode > 0:
         remaining = slow_mode - elapsed
-        wait_time = max(0, remaining) + random.uniform(1.5, 3.5)
-        if remaining > 0: log_message(f"Menunggu Antrian Slow Mode ({remaining:.1f}s)...", "WAIT")
+        if remaining > 0:
+            wait_time = remaining + random.uniform(1.0, 2.0)
+            log_message(f"Menunggu Slow Mode ({wait_time:.1f}s)...", "WAIT")
+            time.sleep(wait_time)
+        else:
+            # Tetap kasih jeda natural meski sudah lewat waktunya
+            time.sleep(random.uniform(1.5, 3.0))
     else:
-        wait_time = random.uniform(2.0, 4.5)
+        time.sleep(random.uniform(2.0, 4.5))
 
     typing_duration = min(len(text) * 0.12, 8.0) 
     
-    if wait_time > typing_duration:
-        time.sleep(wait_time - typing_duration)
-        log_message(f"Sedang mengetik... ({typing_duration:.1f}s)", "TYPING")
-        trigger_typing(channel_id, token, typing_duration)
-    else:
-        log_message(f"Sedang mengetik... ({wait_time:.1f}s)", "TYPING")
-        trigger_typing(channel_id, token, wait_time)
+    log_message(f"Sedang mengetik... ({typing_duration:.1f}s)", "TYPING")
+    trigger_typing(channel_id, token, typing_duration)
 
     try:
         res = requests.post(
@@ -294,6 +388,10 @@ def get_recent_chat_context(channel_id, token, limit=15, bot_id=None):
     except: pass
     return ""
 
+# ==========================================
+# BAGIAN 5: LOGIKA UTAMA BOT (LOOP)
+# ==========================================
+
 def auto_reply(channel_id, settings, token):
     headers = {'Authorization': token}
     bot_name, _, bot_id = get_bot_info(token)
@@ -302,34 +400,35 @@ def auto_reply(channel_id, settings, token):
     
     log_message(f"Bot start: {bot_name} di Channel {channel_id}", "SUCCESS")
 
-    if settings["send_intro"]:
-        startup_delay = random.uniform(5.0, 15.0)
-        log_message(f"Menganalisa chat... (Tunggu {startup_delay:.1f}s)", "WAIT")
-        time.sleep(startup_delay)
+    # --- MODE 1: MENGGUNAKAN AI ---
+    if settings["use_google_ai"]:
+        if settings["send_intro"]:
+            startup_delay = random.uniform(5.0, 15.0)
+            log_message(f"Menganalisa chat... (Tunggu {startup_delay:.1f}s)", "WAIT")
+            time.sleep(startup_delay)
 
-        context_str_intro = get_recent_chat_context(channel_id, token, 15, bot_id)
-        intro_text = None
-        
-        if context_str_intro:
-            if settings["prompt_language"] == 'id':
-                prompt_intro = f"SPECIAL:Riwayat chat:\n{context_str_intro}\nInstruksi: Kamu baru online. Buat 1 kalimat singkat (Indo gaul, lowercase) untuk NIMBRUNG topik di atas. Jangan kaku."
-            else:
-                prompt_intro = f"SPECIAL:Chat history:\n{context_str_intro}\nInstruction: You just came online. Create 1 short, casual, lowercase sentence to JOIN the topic above."
+            context_str_intro = get_recent_chat_context(channel_id, token, 15, bot_id)
+            intro_text = None
+            
+            if context_str_intro:
+                if settings["prompt_language"] == 'id':
+                    prompt_intro = f"SPECIAL:Riwayat chat:\n{context_str_intro}\nInstruksi: Kamu baru online. Buat 1 kalimat singkat (Indo gaul, lowercase) untuk NIMBRUNG topik di atas. Jangan kaku."
+                else:
+                    prompt_intro = f"SPECIAL:Chat history:\n{context_str_intro}\nInstruction: You just came online. Create 1 short, casual, lowercase sentence to JOIN the topic above."
 
-            intro_text = generate_reply(prompt_intro, settings["prompt_language"], True)
+                intro_text = generate_reply(prompt_intro, settings["prompt_language"], True)
 
-        if not intro_text or "Waduh" in intro_text:
-            intro_list = INTRO_MSGS_ID if settings["prompt_language"] == 'id' else INTRO_MSGS_EN
-            intro_text = random.choice(intro_list)
+            if not intro_text or "Waduh" in intro_text:
+                intro_list = INTRO_MSGS_ID if settings["prompt_language"] == 'id' else INTRO_MSGS_EN
+                intro_text = random.choice(intro_list)
 
-        send_message(channel_id, intro_text, token, delete_after=settings["delete_bot_reply"])
-        last_interaction_time = time.time()
-        time.sleep(random.uniform(5, 10))
+            send_message(channel_id, intro_text, token, delete_after=settings["delete_bot_reply"])
+            last_interaction_time = time.time()
+            time.sleep(random.uniform(5, 10))
 
-    while True:
-        current_time = time.time()
-        
-        if settings["use_google_ai"]:
+        # LOOP AI
+        while True:
+            current_time = time.time()
             time.sleep(settings["read_delay"] + random.uniform(0.5, 1.5))
 
             try:
@@ -382,9 +481,9 @@ def auto_reply(channel_id, settings, token):
                             if reply:
                                 do_reply = settings["use_reply"] or True
                                 send_message(channel_id, reply, token,
-                                             reply_to=m_id if do_reply else None,
-                                             delete_after=settings["delete_bot_reply"],
-                                             delete_immediately=settings["delete_immediately"])
+                                                reply_to=m_id if do_reply else None,
+                                                delete_after=settings["delete_bot_reply"],
+                                                delete_immediately=settings["delete_immediately"])
                                 
                                 if len(priority_queue) > 1:
                                     time.sleep(random.uniform(2.0, 4.0))
@@ -406,9 +505,9 @@ def auto_reply(channel_id, settings, token):
                                 if reply:
                                     do_reply = settings["use_reply"]
                                     send_message(channel_id, reply, token,
-                                                 reply_to=m_id if do_reply else None,
-                                                 delete_after=settings["delete_bot_reply"],
-                                                 delete_immediately=settings["delete_immediately"])
+                                                     reply_to=m_id if do_reply else None,
+                                                     delete_after=settings["delete_bot_reply"],
+                                                     delete_immediately=settings["delete_immediately"])
 
                     if settings["auto_revive"] and (current_time - last_interaction_time > settings["revive_interval"]):
                         log_message(f"Chat sepi selama {settings['revive_interval']}s. Mencoba membangkitkan topik...", "REVIVE")
@@ -433,54 +532,97 @@ def auto_reply(channel_id, settings, token):
                             last_interaction_time = time.time()
                             
             except Exception as e:
-                log_message(f"Error Loop: {e}", "ERROR")
+                log_message(f"Error Loop AI: {e}", "ERROR")
                 time.sleep(5)
 
-        else:
-            time.sleep(settings["delay_interval"])
+    # --- MODE 2: MANUAL (CHAT.TXT) ---
+    else:
+        log_message(f"Mode Manual: Menyesuaikan delay dengan server...", "INFO")
+        
+        while True:
+            # 1. Kirim pesan
             msg = generate_reply("", settings["prompt_language"], False)
+            log_message(f"Mengirim pesan manual: {msg}", "INFO")
+            
+            # send_message sudah mengurus delay awal agar tidak rate limit saat mengirim
             send_message(channel_id, msg, token,
                          delete_after=settings["delete_bot_reply"],
                          delete_immediately=settings["delete_immediately"])
+            
+            # 2. Hitung Delay untuk pesan BERIKUTNYA
+            # Ambil slowmode terbaru dari server
+            current_slowmode = get_channel_slowmode(channel_id, token)
+            
+            # Logika Cerdas: Gunakan angka terbesar antara input user vs slowmode server
+            # Jika user isi 16s, tapi server 120s -> bot tunggu 120s (biar aman)
+            # Jika user isi 60s, tapi server 5s   -> bot tunggu 60s (biar santai)
+            effective_delay = max(settings['delay_interval'], current_slowmode)
+            
+            # Tambah sedikit random buffer (2-5 detik) agar tidak pas banget dan terdeteksi bot
+            final_wait = effective_delay + random.uniform(2.0, 5.0)
+            
+            log_message(f"Menunggu {final_wait:.1f}s (Server: {current_slowmode}s, User: {settings['delay_interval']}s)...", "WAIT")
+            time.sleep(final_wait)
+
+# ==========================================
+# BAGIAN 6: SETUP SETTINGS (UI BARU)
+# ==========================================
 
 def get_server_settings(channel_id, channel_name):
-    print(f"\n--- PENGATURAN CHANNEL {channel_id} ({channel_name}) ---")
-    use_ai = input("Gunakan Gemini AI? (y/n): ").lower() == 'y'
-    lang = input("Bahasa (en/id): ").lower()
-    if lang not in ['en', 'id']: lang = 'id'
+    print_header(f"KONFIGURASI CHANNEL: {channel_name}")
+    print(f"{Fore.LIGHTBLACK_EX}ID: {channel_id}{Style.RESET_ALL}\n")
 
+    # 1. Konfigurasi AI
+    use_ai = ask_yes_no("Gunakan Gemini AI?")
+    
+    # 2. Konfigurasi Bahasa
+    lang = ask_choice("Bahasa Prompt", ['en', 'id'], default='id')
+
+    # Default values
     send_intro = False
     read_delay = 3
     auto_chat = False
     auto_revive = False
     revive_interval = 600
+    delay_interval = 60
     
     if use_ai:
-        send_intro = input("Kirim pesan PEMBUKA (Contextual Intro) saat mulai? (y/n): ").lower() == 'y'
-        read_delay = int(input("Interval Cek Pesan (detik) [Default 3]: ") or 3)
+        print(f"\n{Fore.CYAN}--- PENGATURAN AI ---{Style.RESET_ALL}")
+        send_intro = ask_yes_no("Kirim pesan PEMBUKA (Contextual Intro) saat start?")
+        read_delay = ask_int("Interval Cek Pesan (detik)", default=3)
         
-        print("Mode Auto Chat:")
-        print("y = Balas SEMUA chat orang (Rusuh/Nimbrung)")
-        print("n = Cuma balas kalau di-REPLY/MENTION (Silent)")
-        auto_chat = input("Pilih (y/n): ").lower() == 'y'
+        print(f"\n{Fore.CYAN}--- MODE INTERAKSI ---{Style.RESET_ALL}")
+        print(f"{Fore.LIGHTBLACK_EX}   [y] = Rusuh/Nimbrung (Balas semua chat orang)")
+        print(f"   [n] = Kalem (Hanya balas reply/mention){Style.RESET_ALL}")
+        auto_chat = ask_yes_no("Aktifkan Mode Rusuh (Auto Chat)?")
 
-        print("\n[FITUR BARU] Auto Revive (Pembangkit Topik):")
-        print("Jika chat sepi (tidak ada reply/quote), bot akan bahas topik terakhir lagi.")
-        auto_revive = input("Aktifkan Auto Revive? (y/n): ").lower() == 'y'
+        print(f"\n{Fore.CYAN}--- AUTO REVIVE (PEMBANGKIT TOPIK) ---{Style.RESET_ALL}")
+        auto_revive = ask_yes_no("Aktifkan Auto Revive (Hidupkan chat mati)?")
         if auto_revive:
-            revive_interval = int(input("Berapa detik chat harus sepi sebelum bot muncul? (Cth: 600 = 10 menit): ") or 600)
+            revive_interval = ask_int("Berapa detik chat sepi sebelum bot muncul?", default=600)
+    else:
+        print(f"\n{Fore.CYAN}--- PENGATURAN MANUAL ---{Style.RESET_ALL}")
+        print(f"{Fore.LIGHTBLACK_EX}(Bot akan otomatis mengikuti slowmode server jika lebih lama dari inputmu){Style.RESET_ALL}")
+        delay_interval = ask_int("Delay MINIMUM chat manual (detik)", default=60)
 
-    use_reply = input("Default Reply Mode (Chat biasa reply/tidak)? (y/n): ").lower() == 'y'
+    print(f"\n{Fore.CYAN}--- PENGATURAN UMUM ---{Style.RESET_ALL}")
+    use_reply = ask_yes_no("Gunakan fitur Reply (Quote) chat orang?")
 
     del_after = None
     del_now = False
-    if input("Hapus balasan bot? (y/n): ").lower() == 'y':
-        del_val = input("Hapus setelah berapa detik? (0/kosong = langsung): ")
-        if not del_val or del_val == '0':
+    
+    if ask_yes_no("Hapus pesan balasan bot otomatis?"):
+        print(f"{Fore.LIGHTBLACK_EX}   (0 = Hapus secepat kilat / Flash){Style.RESET_ALL}")
+        del_val = ask_int("Hapus setelah berapa detik?", default=0)
+        
+        if del_val == 0:
             del_now = True
         else:
-            del_after = int(del_val)
+            del_after = del_val
 
+    print(f"\n{Fore.GREEN}[SUCCESS] Konfigurasi untuk {channel_name} tersimpan!{Style.RESET_ALL}")
+    time.sleep(1) 
+    
     return {
         "use_google_ai": use_ai, 
         "prompt_language": lang,
@@ -489,17 +631,24 @@ def get_server_settings(channel_id, channel_name):
         "auto_chat_mode": auto_chat,
         "auto_revive": auto_revive,
         "revive_interval": revive_interval,
-        "delay_interval": 60,
+        "delay_interval": delay_interval, 
         "use_reply": use_reply,
         "delete_bot_reply": del_after, 
         "delete_immediately": del_now
     }
+
+# ==========================================
+# BAGIAN 7: EKSEKUSI UTAMA
+# ==========================================
 
 if __name__ == "__main__":
     try:
         ryans.banner()
     except Exception as e:
         print(f"Error loading Ryans Banner: {e}")
+    
+    # Load chat file di awal
+    load_chat_file()
         
     bot_details = []
     for t in discord_tokens:
