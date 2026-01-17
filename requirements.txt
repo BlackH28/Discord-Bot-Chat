@@ -1,0 +1,4 @@
+ryans-891
+python-dotenv
+colorama
+requests
